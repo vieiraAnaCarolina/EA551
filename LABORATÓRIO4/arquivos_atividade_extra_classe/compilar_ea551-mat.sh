@@ -1,0 +1,1 @@
+flex ea551-mat-txt-parser.l && bison -d ea551-mat-txt-parser.y && gcc -o ea551-mat ea551-mat.c ea551-mat-txt-parser.tab.c lex.yy.c
