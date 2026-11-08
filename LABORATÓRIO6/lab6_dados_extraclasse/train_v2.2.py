@@ -9,37 +9,41 @@ import posix_ipc
 import torch
 import tqdm
 
+#Imagem do MNIST na RAM
 class SharedImage(ctypes.Structure):
     _fields_ = [
-        ("pixels", ctypes.c_float * 784),
-        ("label", ctypes.c_int32),
+        ("pixels", ctypes.c_float * 784), #Imagem de 28x28
+        ("label", ctypes.c_int32),        #Rótulo Imagem (0 a 9)
     ]
 
+#Estrutura do buffer compartilhado
 class SharedBuffer(ctypes.Structure):
     _fields_ = [
-        ("buffer", SharedImage * 256),
-        ("write_idx", ctypes.c_int32),
-        ("read_idx", ctypes.c_int32),
-        ("is_done", ctypes.c_int32),
+        ("buffer", SharedImage * 256), #256 imagens
+        ("write_idx", ctypes.c_int32), #indice de escrita
+        ("read_idx", ctypes.c_int32),  #indice de leitura
+        ("is_done", ctypes.c_int32),   #flag producao de todas feita
     ]
 
+#Sincronização dos processos, mapeamento de memória e pytorch
 def train_c_shm(args):
     print("Conectando aos semáforos e à memória compartilhada POSIX...")
     
-    sem_empty = posix_ipc.Semaphore("/ea551_sem_empty")
-    sem_full = posix_ipc.Semaphore("/ea551_sem_full")
-    sem_mutex = posix_ipc.Semaphore("/ea551_sem_mutex")
+    sem_empty = posix_ipc.Semaphore("/ea551_sem_empty")  #Quantas posições vagas restam no buffer
+    sem_full = posix_ipc.Semaphore("/ea551_sem_full")    #Quantas posições têm dados prontos para leitura
+    sem_mutex = posix_ipc.Semaphore("/ea551_sem_mutex")  #Semáforo
 
-    shm = posix_ipc.SharedMemory("/ea551_mnist_shm")
-    
-    mapped_mem = mmap.mmap(shm.fd, ctypes.sizeof(SharedBuffer))
-    shm_buf = SharedBuffer.from_buffer(mapped_mem)
+
+    shm = posix_ipc.SharedMemory("/ea551_mnist_shm")            #abre memoria alocada pelo produtor
+    mapped_mem = mmap.mmap(shm.fd, ctypes.sizeof(SharedBuffer)) #mapeia o fd para end do python
+    shm_buf = SharedBuffer.from_buffer(mapped_mem)              #python acessar o buffer como um objeto nativo
 
     print("Inicialização do modelo de rede neural (sem bias e com normalização / 255.0)...")
     model = torch.nn.Linear(28 * 28, 10, bias=False)
     optimizer = torch.optim.SGD(model.parameters(), lr=args["learning_rate"])
     loss_function = torch.nn.CrossEntropyLoss()
 
+    #Para o cáculo da acurácia
     predictions = []
     targets = []
     t_read = 0.0
@@ -49,24 +53,28 @@ def train_c_shm(args):
     iterator = tqdm.tqdm(range(num_samples), desc="Consumidor C-SHM lendo dados e treinando")
 
     for _ in iterator:
+
+        #Marcação tempo
         t0 = time.perf_counter()
-
         t_read_start = time.perf_counter()
-        
-        sem_full.acquire()
-        sem_mutex.acquire()
 
-        idx = shm_buf.read_idx
-        img_struct = shm_buf.buffer[idx]
+        sem_full.acquire()   #verifica se tem algum dado pronto no buffer
+        sem_mutex.acquire()  #garantia nenhum outro processo altere enquanto lê a posição atual
 
-        pixels_np = np.ctypeslib.as_array(img_struct.pixels).copy()
-        image_class = int(img_struct.label)
+        #Processo de leitura e extração dos dados da RAM
+        idx = shm_buf.read_idx           #Lê o ponteiro atual
+        img_struct = shm_buf.buffer[idx] #Acessa a sharedimage pelo index
 
-        shm_buf.read_idx = (idx + 1) % 256
+        pixels_np = np.ctypeslib.as_array(img_struct.pixels).copy() #Converte e extrai o rótulo
+        image_class = int(img_struct.label) 
 
-        sem_mutex.release()
-        sem_empty.release()
+        shm_buf.read_idx = (idx + 1) % 256 #Incrementa o ponteiro de leitura da fila 
 
+        sem_mutex.release() #Abre o mutex, c pode acessar buffer
+        sem_empty.release() #Incrementa o semáforo de posições livres
+
+
+        #Tempo de leitura, treinamento rede neural e coleta métricas de desempenho
         image_tensor = (torch.from_numpy(pixels_np) / 255.0).view(1, -1)
         t_read += time.perf_counter() - t_read_start
 

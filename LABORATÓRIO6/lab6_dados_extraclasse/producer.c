@@ -10,31 +10,34 @@
 #include <dirent.h>
 #include <pthread.h>
 #include <errno.h>
-#include <time.h> // Adicionado para srand(time(NULL))
+#include <time.h> 
 
 #include "shm_common.h"
 
 typedef struct __attribute__((packed)) {
-    char magic[4];     // EMAT
-    uint8_t dtype;     // 0=UINT8, 1=INT32, 2=FLOAT32
+    char magic[4];        //EMAT
+    uint8_t dtype;        //0=UINT8, 1=INT32, 2=FLOAT32
     uint32_t rows;
     uint32_t cols;
 } EmatHeader;
 
 typedef struct {
-    char filepath[1024];
-    int label;
+    char filepath[1024];  //Guarda o caminho relativo para um .emat
+    int label;            //Guarda o digito (0 a 9)
 } FileTask;
 
-FileTask *file_tasks = NULL;
-size_t total_files = 0;
-size_t current_file_idx = 0;
 
-pthread_mutex_t task_mutex = PTHREAD_MUTEX_INITIALIZER;
-SharedBuffer *shm_ptr = NULL;
-sem_t *sem_empty = NULL;
-sem_t *sem_full = NULL;
-sem_t *sem_mutex = NULL;
+FileTask *file_tasks = NULL;        //Ponteiro para o vetor dinânico de tarefas na heap
+size_t total_files = 0;             //Quantidade files pegas
+size_t current_file_idx = 0;        //Indice progressão da fila
+
+
+pthread_mutex_t task_mutex = PTHREAD_MUTEX_INITIALIZER; //mutex threads não pegarem a mesma file
+SharedBuffer *shm_ptr = NULL;                           // Ponteiro retornado pelo mmap. Aponta RAM compartilhada
+sem_t *sem_empty = NULL;                                //espaço disponivel buffer
+sem_t *sem_full = NULL;                                 //itens prontos para consumo
+sem_t *sem_mutex = NULL;                                //impede acesso simultâneo
+
 
 static ssize_t read_all(int fd, void *buf, size_t count) {
     size_t total = 0;
@@ -51,6 +54,7 @@ static ssize_t read_all(int fd, void *buf, size_t count) {
     return total;
 }
 
+//Mapeamento e indexação dos arquivos no disco
 void collect_files(const char *base_path) {
     for (int digit = 0; digit <= 9; digit++) {
         char dir_path[1024];
@@ -61,8 +65,9 @@ void collect_files(const char *base_path) {
 
         struct dirent *entry;
         while ((entry = readdir(dir)) != NULL) {
-            if (strstr(entry->d_name, ".emat")) {
+            if (strstr(entry->d_name, ".emat")) { //apenas tipo .emat
                 file_tasks = realloc(file_tasks, sizeof(FileTask) * (total_files + 1));
+                //monta e salva o caminho do arquivo na estrutura FIleTask e associa o digito
                 snprintf(file_tasks[total_files].filepath, sizeof(file_tasks[total_files].filepath), "%s/%s", dir_path, entry->d_name);
                 file_tasks[total_files].label = digit;
                 total_files++;
@@ -87,23 +92,28 @@ void shuffle_files(FileTask *array, size_t n) {
 void *worker_thread(void *arg) {
     while (1) {
         size_t idx;
+        //Entra na região critica verifica se todas já foram processadas e salva o indice para o prox
         pthread_mutex_lock(&task_mutex);
         if (current_file_idx >= total_files) {
             pthread_mutex_unlock(&task_mutex);
             break;
         }
+
         idx = current_file_idx++;
         pthread_mutex_unlock(&task_mutex);
 
+        
         int fd = open(file_tasks[idx].filepath, O_RDONLY);
         if (fd < 0) continue;
 
+        //Cabeçaho EMatHeader
         EmatHeader header;
         if (read_all(fd, &header, sizeof(EmatHeader)) != sizeof(EmatHeader)) {
             close(fd);
             continue;
         }
 
+        //espaço temporário 
         float temp_pixels[IMAGE_SIZE];
         if (header.dtype == 0) { // UINT8
             uint8_t raw[IMAGE_SIZE];
@@ -118,6 +128,7 @@ void *worker_thread(void *arg) {
         sem_wait(sem_mutex);
 
         int slot = shm_ptr->write_idx;
+        //Copia do temp pro pixels grava a label e avança o ponteiro
         memcpy(shm_ptr->samples[slot].pixels, temp_pixels, sizeof(float) * IMAGE_SIZE);
         shm_ptr->samples[slot].label = file_tasks[idx].label;
         shm_ptr->write_idx = (shm_ptr->write_idx + 1) % BUFFER_SIZE;
@@ -138,8 +149,7 @@ int main(int argc, char *argv[]) {
     printf("Indexando arquivos .emat de %s...\n", emat_dir);
     collect_files(emat_dir);
     printf("Total de amostras encontradas: %zu\n", total_files);
-
-    // --- NOVO: Embaralha a lista antes das worker threads iniciarem ---
+    
     printf("Embaralhando amostras (shuffle)...\n");
     shuffle_files(file_tasks, total_files);
 
