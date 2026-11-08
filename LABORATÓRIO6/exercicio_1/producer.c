@@ -25,6 +25,7 @@
 #define BUFFER_SIZE     256
 #define IMAGE_SIZE      784
 
+/*
 typedef struct {
     float pixels[IMAGE_SIZE];
     int32_t label;
@@ -36,6 +37,7 @@ typedef struct {
     int32_t read_idx;
     int32_t is_done;
 } SharedBuffer;
+*/
 
 typedef struct __attribute__((packed)) {
     char magic[4];     // "EMAT"
@@ -61,6 +63,11 @@ static SharedBuffer *shm_ptr = NULL;
 static sem_t *sem_empty = NULL;
 static sem_t *sem_full = NULL;
 static sem_t *sem_mutex = NULL;
+
+// Novas variáveis globais para controle das worker threads pela stop_dataloader
+static pthread_t *worker_threads = NULL;
+static int global_num_threads = 0;
+static int shm_fd_global = -1;
 
 // =========================================================================
 // 3. FUNÇÕES AUXILIARES
@@ -157,49 +164,84 @@ static void *worker_thread(void *arg) {
 }
 
 // =========================================================================
-// 4. FUNÇÃO EXPORTADA PARA A LIBMNIST.SO
+// 4. FUNÇÕES EXPORTADAS PARA A LIBMNIST.SO
 // =========================================================================
+
 __attribute__((visibility("default"))) void start_dataloader(int num_threads, const char *emat_dir) {
     if (!emat_dir) emat_dir = "../mnist_emat/train";
     if (num_threads <= 0) num_threads = 4;
 
+    global_num_threads = num_threads;
     total_files = 0;
     current_file_idx = 0;
 
+    // Varre o diretório e embaralha os arquivos
     collect_files(emat_dir);
     shuffle_files(file_tasks, total_files);
 
+    // Criação da SHM e limpeza prévia de recursos residuais
     shm_unlink(SHM_NAME);
     sem_unlink(SEM_EMPTY_NAME);
-    sem_unlink(SEM_FULL_NAME);
+    sem_unlink(SEM_FULL_NAME); 
     sem_unlink(SEM_MUTEX_NAME);
 
-    int shm_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
-    if (ftruncate(shm_fd, sizeof(SharedBuffer)) == -1) {
+    shm_fd_global = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
+    if (ftruncate(shm_fd_global, sizeof(SharedBuffer)) == -1) {
         perror("ftruncate");
         return;
     }
-    shm_ptr = mmap(0, sizeof(SharedBuffer), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    shm_ptr = mmap(0, sizeof(SharedBuffer), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd_global, 0);
     memset(shm_ptr, 0, sizeof(SharedBuffer));
 
+    // Inicialização dos semáforos POSIX
     sem_empty = sem_open(SEM_EMPTY_NAME, O_CREAT, 0666, BUFFER_SIZE);
     sem_full  = sem_open(SEM_FULL_NAME, O_CREAT, 0666, 0);
     sem_mutex = sem_open(SEM_MUTEX_NAME, O_CREAT, 0666, 1);
 
-    pthread_t threads[num_threads];
-    for (int i = 0; i < num_threads; i++) {
-        pthread_create(&threads[i], NULL, worker_thread, NULL);
+    // Aloca e dispara o pool de worker threads nativas em C
+    worker_threads = malloc(sizeof(pthread_t) * global_num_threads);
+    for (int i = 0; i < global_num_threads; i++) {
+        pthread_create(&worker_threads[i], NULL, worker_thread, NULL);
+    }
+}
+
+__attribute__((visibility("default"))) void stop_dataloader(void) {
+    // 1. Aguarda a finalização das worker threads ativas
+    if (worker_threads) {
+        for (int i = 0; i < global_num_threads; i++) {
+            pthread_join(worker_threads[i], NULL);
+        }
+        free(worker_threads);
+        worker_threads = NULL;
     }
 
-    for (int i = 0; i < num_threads; i++) {
-        pthread_join(threads[i], NULL);
+    // 2. Sinaliza término no cabeçalho da SHM e destrava eventuais leituras
+    if (shm_ptr != NULL) {
+        shm_ptr->is_done = 1;
+        if (sem_full) sem_post(sem_full);
+        
+        munmap(shm_ptr, sizeof(SharedBuffer));
+        shm_ptr = NULL;
     }
 
-    shm_ptr->is_done = 1;
-    sem_post(sem_full);
+    if (shm_fd_global != -1) {
+        close(shm_fd_global);
+        shm_fd_global = -1;
+    }
 
+    // 3. Libera o vetor de tarefas de arquivos
     if (file_tasks) {
         free(file_tasks);
         file_tasks = NULL;
     }
+
+    // 4. Fecha e remove os semáforos e o segmento SHM do kernel do Linux
+    if (sem_empty) sem_close(sem_empty);
+    if (sem_full)  sem_close(sem_full);
+    if (sem_mutex) sem_close(sem_mutex);
+
+    sem_unlink(SEM_EMPTY_NAME);
+    sem_unlink(SEM_FULL_NAME);
+    sem_unlink(SEM_MUTEX_NAME);
+    shm_unlink(SHM_NAME);
 }

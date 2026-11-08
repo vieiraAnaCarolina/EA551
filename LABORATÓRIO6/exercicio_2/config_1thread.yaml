@@ -1,0 +1,6 @@
+mode: "test"
+model_path: "model.bin"
+input_path: "../mnist_emat/test"
+num_threads: 1
+buffer_size: 64
+enable_x11: 0
