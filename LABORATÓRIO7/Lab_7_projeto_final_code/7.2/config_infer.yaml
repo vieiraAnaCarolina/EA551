@@ -1,0 +1,7 @@
+mode: "infer"
+model_path: "model.bin"
+input_path: "../../big_mnist_emat/test/0/60003.emat"
+num_threads: 4
+num_samples: 1
+buffer_size: 256
+enable_x11: 1

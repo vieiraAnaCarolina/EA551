@@ -1,0 +1,9 @@
+mode: "test"
+model_path: "model.bin"
+input_path: "../../big_mnist_emat/test"
+num_threads: 1
+num_consumers: 1
+matmul_threads: 4
+buffer_size: 256
+num_samples: 10000
+enable_x11: 0
