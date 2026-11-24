@@ -6,8 +6,10 @@ df["tempo_s"] = pd.to_numeric(df["tempo_s"], errors="coerce")
 df = df.dropna(subset=["tempo_s"])
 
 base_df = df[df["experimento"] == "base"]
+if base_df.empty:
+    raise ValueError("Nenhuma linha com experimento == 'base' encontrada em resultados_ablacao.csv")
+
 base_mean = base_df["tempo_s"].mean()
-base_std = base_df["tempo_s"].std()
 
 experiments = [
     ("produtores", "Número de Produtores (num_threads)", 1, "ablacao_produtores.png"),
@@ -19,10 +21,11 @@ experiments = [
 for exp_name, xlabel, base_val, out_file in experiments:
     sub = df[df["experimento"] == exp_name].copy()
     sub["valor_num"] = pd.to_numeric(sub["valor"], errors="coerce")
+    sub = sub.dropna(subset=["valor_num"])
 
     stats = (
         sub.groupby("valor_num")["tempo_s"]
-        .agg(["mean", "std"])
+        .agg(["mean"])
         .reset_index()
         .sort_values("valor_num")
     )
@@ -31,19 +34,16 @@ for exp_name, xlabel, base_val, out_file in experiments:
         base_row = pd.DataFrame({
             "valor_num": [base_val],
             "mean": [base_mean],
-            "std": [base_std]
         })
         stats = pd.concat([base_row, stats], ignore_index=True).sort_values("valor_num")
 
     plt.figure(figsize=(8, 4.8))
-    plt.errorbar(
+    plt.plot(
         stats["valor_num"],
         stats["mean"],
-        yerr=stats["std"].fillna(0.0),
         marker="o",
-        capsize=4,
         linewidth=2,
-        label="Média ± Desvio Padrão"
+        label="Média"
     )
 
     base_y = stats.loc[stats["valor_num"] == base_val, "mean"].iloc[0]
@@ -56,6 +56,9 @@ for exp_name, xlabel, base_val, out_file in experiments:
         fontsize=9,
         color="crimson"
     )
+
+    if exp_name == "buffer_size":
+        plt.ylim(1.0, 2.2)
 
     plt.xticks(stats["valor_num"], [str(int(v)) for v in stats["valor_num"]])
     plt.title(f"Ablação — {xlabel}")
