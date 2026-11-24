@@ -13,7 +13,12 @@ run_one() {
 
     for r in $(seq 1 $reps); do
         output=$(./ea551_runner "$yaml_file")
-        tempo=$(echo "$output" | awk -F'Tempo total no modo test: ' '/Tempo total no modo test:/ {print $2}' | awk '{print $1}')
+        tempo=$(echo "$output" | awk -F'Tempo total no modo test: ' '/Tempo total no modo test:/ {print $2}' | awk '{print $1}' | tail -n 1)
+        if [ -z "$tempo" ]; then
+            echo "ERRO ao extrair tempo para ${yaml_file} (execução ${r})" >&2
+            echo "$output" >&2
+            exit 1
+        fi
         echo "${exp},${param},${val},${r},${tempo}" >> "$OUT"
         echo "[${exp} | ${param}=${val} | run ${r}] -> ${tempo} s"
     done
@@ -21,15 +26,15 @@ run_one() {
 
 run_one "base" "baseline" "1" "ablation_yamls/base.yaml"
 
-for p in 2 4 8 16; do
+for p in 2 4 6 8 12 16; do
     run_one "produtores" "num_threads" "$p" "ablation_yamls/prod_${p}.yaml"
 done
 
-for c in 2 4 8 16 32 64; do
+for c in 2 4 8 16 32; do
     run_one "consumidores" "num_consumers" "$c" "ablation_yamls/cons_${c}.yaml"
 done
 
-for m in 2 4 8; do
+for m in 2 4 6 8; do
     run_one "matmul_threads" "matmul_threads" "$m" "ablation_yamls/matmul_${m}.yaml"
 done
 
